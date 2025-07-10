@@ -4,3 +4,4 @@ post.csv
 .venv
 *.jsonl
 *.csv
+.env
