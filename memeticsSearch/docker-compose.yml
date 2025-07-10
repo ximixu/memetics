@@ -11,6 +11,7 @@ services:
       - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-admin123} # Default password for local dev, doesn't currently use it
       - "DISABLE_INSTALL_DEMO_CONFIG=true" # Disable demo config for cleaner setup
       - "DISABLE_SECURITY_PLUGIN=true" # Disable security for easier local development
+      - "plugins.ml_commons.only_run_on_ml_node=false" # Allow ML models to run on data nodes
     ulimits:
       memlock:
         soft: -1
