@@ -106,6 +106,70 @@ async function neuralSearch(queryText: string, size: number = 5, k: number = 10)
   }
 }
 
+// Neural search with date sorting (preserves scores)
+async function neuralSearchSortedByDate(queryText: string, size: number = 10, k: number = 50) {
+  console.log(`🔍 Searching for: "${queryText}"`);
+  console.log(`📊 Using model: ${MODEL_ID}`);
+  console.log('⏳ Performing neural search, then sorting by date...\n');
+
+  try {
+    // First, get results with scores (no sorting)
+    const response = await client.search({
+      index: 'posts',
+      body: {
+        size: k, // Get more results for better sorting
+        query: {
+          neural: {
+            full_text_vector: {
+              query_text: queryText,
+              model_id: MODEL_ID,
+              k: k
+            }
+          }
+        },
+        _source: ['full_text', 'username', 'created_at', 'retweet_count', 'favorite_count', 'tweet_id']
+      }
+    });
+
+    const hits = response.body.hits.hits as SearchResult[];
+    
+    if (hits.length === 0) {
+      console.log('❌ No results found');
+      return;
+    }
+
+    // Sort by date in JavaScript (preserves scores)
+    const sortedHits = hits.sort((a, b) => {
+      return new Date(b._source.created_at).getTime() - new Date(a._source.created_at).getTime();
+    });
+
+    // Take only the requested number of results
+    const topResults = sortedHits.slice(0, size);
+    console.log(`✅ Found ${topResults.length} results (sorted by date, scores preserved):\n`);
+    
+    topResults.forEach((hit, index) => {
+      const source = hit._source;
+      const score = hit._score.toFixed(3);
+      const text = source.full_text.length > 150 
+        ? source.full_text.substring(0, 150) + '...' 
+        : source.full_text;
+      
+      console.log(`${index + 1}. Score: ${score}`);
+      console.log(`   User: ${source.username}`);
+      console.log(`   Date: ${new Date(source.created_at).toLocaleDateString()}`);
+      console.log(`   Engagement: ${source.retweet_count} RTs, ${source.favorite_count} likes`);
+      console.log(`   Text: ${text}`);
+      console.log('');
+    });
+
+    console.log(`📈 Search took: ${response.body.took}ms`);
+    
+  } catch (error) {
+    console.error('❌ Search error:', error);
+    process.exit(1);
+  }
+}
+
 // Handle hybrid search (neural + keyword)
 async function hybridSearch(queryText: string, size: number = 5, k: number = 10) {
   console.log(`🔍 Hybrid search for: "${queryText}"`);
@@ -190,12 +254,14 @@ async function main() {
     console.log('  --size <number>    Number of results to return (default: 5)');
     console.log('  --k <number>       Number of nearest neighbors to consider (default: 10)');
     console.log('  --hybrid           Use hybrid search (neural + keyword)');
+    console.log('  --sort-by-date     Sort results by date (newest first)');
     console.log('  --help             Show this help message');
     console.log('');
     console.log('Examples:');
     console.log('  bun neural_search.ts "artificial intelligence"');
     console.log('  bun neural_search.ts "cryptocurrency bitcoin" --size 10');
     console.log('  bun neural_search.ts "climate change" --hybrid --k 20');
+    console.log('  bun neural_search.ts "machine learning" --sort-by-date --size 10');
     console.log('');
     console.log('Model ID: ' + MODEL_ID);
     return;
@@ -205,11 +271,14 @@ async function main() {
   const sizeIndex = args.indexOf('--size');
   const kIndex = args.indexOf('--k');
   const isHybrid = args.includes('--hybrid');
+  const sortByDate = args.includes('--sort-by-date');
   
   const size = sizeIndex !== -1 ? parseInt(args[sizeIndex + 1]) || 5 : 5;
   const k = kIndex !== -1 ? parseInt(args[kIndex + 1]) || 10 : 10;
 
-  if (isHybrid) {
+  if (sortByDate) {
+    await neuralSearchSortedByDate(queryText, size, k);
+  } else if (isHybrid) {
     await hybridSearch(queryText, size, k);
   } else {
     await neuralSearch(queryText, size, k);
