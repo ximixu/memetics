@@ -39,13 +39,14 @@ class UnionFind:
                 self.parent[root_y] = root_x
                 self.rank[root_x] += 1
 
-def stream_build_reply_relationships(file_path: str, chunk_size: int = 10000) -> Tuple[Dict[str, str], Set[str], int]:
+def stream_build_reply_relationships(file_path: str, chunk_size: int = 10000) -> Tuple[Dict[str, str], Dict[str, str], Set[str], int]:
     """Stream process JSONL to build reply relationships efficiently.
     
     Returns:
-        (reply_mapping, all_tweet_ids, total_tweets)
+        (reply_mapping, tweet_accounts, all_tweet_ids, total_tweets)
     """
     reply_to_parent = {}  # tweet_id -> parent_tweet_id
+    tweet_accounts = {}   # tweet_id -> account_id
     all_tweet_ids = set()
     total_tweets = 0
     retweets_filtered = 0
@@ -79,10 +80,15 @@ def stream_build_reply_relationships(file_path: str, chunk_size: int = 10000) ->
                 continue
                 
             all_tweet_ids.add(tweet_id)
+            account_id = tweet.get('account_id')
+            if account_id:
+                tweet_accounts[tweet_id] = account_id
             
-            # Build reply relationship (no account filtering - cross-account threads)
+            # Build reply relationship (with account filtering - same-user threads only)
             reply_to_tweet_id = tweet.get('reply_to_tweet_id')
-            if reply_to_tweet_id:
+            
+            if reply_to_tweet_id and account_id:
+                # We'll validate account matching in the next phase
                 reply_to_parent[tweet_id] = reply_to_tweet_id
             
             # Progress reporting
@@ -93,12 +99,13 @@ def stream_build_reply_relationships(file_path: str, chunk_size: int = 10000) ->
                       f"found {len(reply_to_parent):,} reply relationships")
     
     elapsed = time.time() - start_time
+    retweet_percentage = (retweets_filtered/total_tweets*100) if total_tweets > 0 else 0
     print(f"Phase 1 complete: {total_tweets:,} total tweets, "
-          f"{retweets_filtered:,} retweets filtered ({retweets_filtered/total_tweets*100:.1f}%), "
+          f"{retweets_filtered:,} retweets filtered ({retweet_percentage:.1f}%), "
           f"{len(all_tweet_ids):,} tweets remaining")
     print(f"Reply relationships: {len(reply_to_parent):,}, Time: {elapsed:.1f}s")
     
-    return reply_to_parent, all_tweet_ids, total_tweets
+    return reply_to_parent, tweet_accounts, all_tweet_ids, total_tweets
 
 def is_retweet(tweet_text: str) -> bool:
     """Check if a tweet is a retweet based on text content."""
@@ -109,20 +116,31 @@ def is_retweet(tweet_text: str) -> bool:
             tweet_text.startswith('RT @ ') or 
             tweet_text.startswith('RT @'))
 
-def find_thread_roots(reply_mapping: Dict[str, str], all_tweet_ids: Set[str]) -> Dict[str, str]:
-    """Use Union-Find to efficiently find thread roots.
+def find_thread_roots(reply_mapping: Dict[str, str], tweet_accounts: Dict[str, str], all_tweet_ids: Set[str]) -> Dict[str, str]:
+    """Use Union-Find to efficiently find thread roots, filtering for same-account threads only.
     
     Returns:
         Dictionary mapping tweet_id -> thread_root_id
     """
-    print("Phase 2: Finding thread roots...")
+    print("Phase 2: Finding thread roots with account filtering...")
     start_time = time.time()
     
     uf = UnionFind()
     
-    # Build connected components
+    # Build connected components, but only for same-account replies
+    valid_relationships = 0
+    filtered_relationships = 0
+    
     for child, parent in reply_mapping.items():
-        uf.union(child, parent)
+        child_account = tweet_accounts.get(child)
+        parent_account = tweet_accounts.get(parent)
+        
+        # Only create thread relationship if both tweets are from the same account
+        if child_account and parent_account and child_account == parent_account:
+            uf.union(child, parent)
+            valid_relationships += 1
+        else:
+            filtered_relationships += 1
     
     # Map each tweet to its thread root
     tweet_to_root = {}
@@ -134,7 +152,10 @@ def find_thread_roots(reply_mapping: Dict[str, str], all_tweet_ids: Set[str]) ->
     roots = set(tweet_to_root.values())
     
     elapsed = time.time() - start_time
-    print(f"Phase 2 complete: {len(roots):,} threads found, Time: {elapsed:.1f}s")
+    print(f"Phase 2 complete: {len(roots):,} threads found")
+    print(f"  Valid same-account relationships: {valid_relationships:,}")
+    print(f"  Filtered cross-account relationships: {filtered_relationships:,}")
+    print(f"  Time: {elapsed:.1f}s")
     
     return tweet_to_root
 
@@ -199,8 +220,9 @@ def stream_build_threads(file_path: str, tweet_to_root: Dict[str, str], chunk_si
 
 def group_tweets_into_threads(jsonl_file: str, chunk_size: int = 10000) -> Dict[str, str]:
     """
-    Scalable function to group tweets into threads across all accounts.
+    Scalable function to group tweets into threads within individual accounts.
     Uses streaming processing to handle large datasets efficiently.
+    Only creates threads for tweets from the same user account.
     
     Args:
         jsonl_file: Path to JSONL file with tweet data
@@ -213,14 +235,14 @@ def group_tweets_into_threads(jsonl_file: str, chunk_size: int = 10000) -> Dict[
     print(f"Chunk size: {chunk_size:,} lines")
     
     # Phase 1: Build reply relationships with streaming
-    reply_mapping, all_tweet_ids, total_tweets = stream_build_reply_relationships(jsonl_file, chunk_size)
+    reply_mapping, tweet_accounts, all_tweet_ids, total_tweets = stream_build_reply_relationships(jsonl_file, chunk_size)
     
     if not reply_mapping and not all_tweet_ids:
         print("No tweets found.")
         return {}
     
-    # Phase 2: Find thread roots efficiently
-    tweet_to_root = find_thread_roots(reply_mapping, all_tweet_ids)
+    # Phase 2: Find thread roots efficiently with account filtering
+    tweet_to_root = find_thread_roots(reply_mapping, tweet_accounts, all_tweet_ids)
     
     # Phase 3: Build final threads with streaming
     final_threads = stream_build_threads(jsonl_file, tweet_to_root, chunk_size)
@@ -257,7 +279,8 @@ def main():
         print("  output_jsonl  : Path to output JSONL file (default: threads.jsonl)")
         print("  chunk_size    : Lines to process between progress updates (default: 10000)")
         print("")
-        print("Note: This version processes ALL accounts and builds cross-account threads.")
+        print("Note: This version processes threads within individual accounts only (same-user threads).")
+        print("Cross-account replies are filtered out to maintain proper thread boundaries.")
         print("Memory usage is optimized for large datasets (multi-GB).")
         sys.exit(1)
     
